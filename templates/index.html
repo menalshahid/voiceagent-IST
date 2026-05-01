@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, maximum-scale=1, user-scalable=no" />
+  <meta name="theme-color" content="#0f172a" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <title>IST AI Admissions Call</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #0f172a;
+      --surface: #1e293b;
+      --surface2: #334155;
+      --green: #10b981;
+      --green-hover: #059669;
+      --red: #ef4444;
+      --red-hover: #dc2626;
+      --text: #f1f5f9;
+      --text-muted: #94a3b8;
+      --border: #475569;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      min-height: -webkit-fill-available;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 1.5rem;
+      padding-bottom: max(1.5rem, env(safe-area-inset-bottom));
+      -webkit-tap-highlight-color: transparent;
+      -webkit-touch-callout: none;
+    }
+
+    .container {
+      width: 100%;
+      max-width: 480px;
+    }
+
+    .header {
+      text-align: center;
+      margin-bottom: 2rem;
+    }
+    .header h1 { font-size: 1.5rem; font-weight: 700; margin-bottom: 0.25rem; }
+    .header p { color: var(--text-muted); font-size: 0.9375rem; }
+
+    .controls {
+      display: flex;
+      gap: 1rem;
+      justify-content: center;
+      margin-bottom: 2rem;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5rem;
+      padding: 1rem 1.75rem;
+      min-height: 48px;
+      min-width: 120px;
+      border: none;
+      border-radius: 12px;
+      font-family: inherit;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.15s;
+      touch-action: manipulation;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn svg { width: 1.25rem; height: 1.25rem; }
+
+    .btn-start {
+      background: var(--green);
+      color: white;
+    }
+    .btn-start:hover:not(:disabled) { background: var(--green-hover); transform: translateY(-1px); }
+
+    .btn-end {
+      background: var(--red);
+      color: white;
+    }
+    .btn-end:hover:not(:disabled) { background: var(--red-hover); transform: translateY(-1px); }
+
+    .status {
+      text-align: center;
+      padding: 0.75rem;
+      margin-bottom: 1.5rem;
+      border-radius: 10px;
+      font-size: 0.9375rem;
+      font-weight: 500;
+      background: var(--surface);
+      border: 1px solid var(--border);
+    }
+    .status.listening { background: rgba(16, 185, 129, 0.12); border-color: var(--green); color: var(--green); }
+    .status.processing { background: rgba(99, 102, 241, 0.12); border-color: #6366f1; color: #a5b4fc; }
+    .status.speaking { background: rgba(99, 102, 241, 0.12); border-color: #6366f1; color: #a5b4fc; }
+
+    .transcript-panel {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      overflow: hidden;
+    }
+    .transcript-panel h3 {
+      padding: 0.875rem 1rem;
+      font-size: 0.8125rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-muted);
+      background: var(--surface2);
+      border-bottom: 1px solid var(--border);
+    }
+    .transcript-list {
+      max-height: 320px;
+      overflow-y: auto;
+      padding: 1rem;
+    }
+    .transcript-list::-webkit-scrollbar { width: 6px; }
+    .transcript-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+    .entry {
+      margin-bottom: 1rem;
+    }
+    .entry:last-child { margin-bottom: 0; }
+    .entry .role {
+      font-size: 0.75rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      margin-bottom: 0.35rem;
+    }
+    .entry.you .role { color: var(--green); }
+    .entry.agent .role { color: #6366f1; }
+    .entry .content {
+      font-size: 0.9375rem;
+      line-height: 1.5;
+      color: var(--text);
+    }
+    .empty-state {
+      color: var(--text-muted);
+      font-size: 0.875rem;
+      text-align: center;
+      padding: 2rem 1rem;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header class="header">
+      <h1>IST AI Admissions</h1>
+      <p>Voice helpline — ask about programs, fees, eligibility</p>
+    </header>
+
+    <div class="status" id="status">Ready — click Start to begin</div>
+
+    <div class="controls">
+      <button class="btn btn-start" id="startBtn" onclick="startCall()">
+        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z"/></svg>
+        Start Call
+      </button>
+      <button class="btn btn-end" id="endBtn" onclick="endCall()" style="display:none">
+        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 8l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2M5 3a2 2 0 00-2 2v1c0 8.284 6.716 15 15 15h1a2 2 0 002-2v-3.28a1 1 0 00-.684-.948l-4.493-1.498a1 1 0 00-1.21.502l-1.13 2.257a11.042 11.042 0 01-5.516-5.516l2.257-1.13a1 1 0 00.502-1.21L9.228 3.683A1 1 0 008.279 3H5z"/></svg>
+        End Call
+      </button>
+    </div>
+
+    <div class="transcript-panel">
+      <h3>Transcription</h3>
+      <div class="transcript-list" id="transcriptList">
+        <div class="empty-state" id="emptyState">No conversation yet. Start a call and speak.</div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/script.js"></script>
+</body>
+</html>
