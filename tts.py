@@ -84,8 +84,12 @@ def _gtts_fallback(text: str, effective_lang: str, filename: str) -> str | None:
     try:
         from gtts import gTTS  # imported here so Groq-only installs still work
 
-        gtts_lang = "ar" if effective_lang == "ur" else "en"
-        tts_obj = gTTS(text=text, lang=gtts_lang)
+        # Urdu must use `ur` (not Arabic) for understandable pronunciation.
+        # `com.pk` nudges pronunciation/style toward Pakistani locale.
+        if effective_lang == "ur":
+            tts_obj = gTTS(text=text, lang="ur", tld="com.pk", slow=False, lang_check=False)
+        else:
+            tts_obj = gTTS(text=text, lang="en", slow=False, lang_check=False)
         tts_obj.save(filename)
 
         if not os.path.exists(filename) or os.path.getsize(filename) == 0:
@@ -98,6 +102,14 @@ def _gtts_fallback(text: str, effective_lang: str, filename: str) -> str | None:
     except Exception as e:
         logger.exception("[TTS] gTTS fallback failed: %s", e)
         return None
+
+
+def _urdu_tts_preferred(text: str, filename: str) -> str | None:
+    """
+    Preferred Urdu path for quality/clarity.
+    Uses native Urdu language synthesis before any Arabic-model fallback.
+    """
+    return _gtts_fallback(text, "ur", filename)
 
 
 def generate_tts(text: str, language: str = "en") -> str | None:
@@ -132,6 +144,12 @@ def generate_tts(text: str, language: str = "en") -> str | None:
         model = _TTS_MODELS.get(effective_lang, _TTS_MODELS["en"])
         voice = _VOICES.get(effective_lang, _VOICES["en"])
         filename = os.path.join(AUDIO_DIR, f"audio_{uuid.uuid4().hex}.mp3")
+
+        # Urdu quality path: use proper Urdu voice first for better intelligibility.
+        if effective_lang == "ur":
+            urdu_url = _urdu_tts_preferred(clean_text, filename)
+            if urdu_url:
+                return urdu_url
 
         disable_reason = _get_groq_tts_disable_reason(effective_lang)
         if disable_reason:
