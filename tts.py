@@ -7,8 +7,10 @@
 import uuid
 import os
 import re
+import sys
 import logging
 import threading
+import subprocess
 
 from groq import BadRequestError as GroqBadRequestError, NotFoundError as GroqNotFoundError
 from groq_utils import get_client, get_next_key_index, GROQ_KEYS
@@ -33,6 +35,9 @@ _VOICES = {
     "en": "leo",
     "ur": "jad",
 }
+
+# Pakistani Urdu neural voices (Microsoft Edge TTS — free, clear on cloud hosts).
+_DEFAULT_EDGE_UR_VOICES = ("ur-PK-UzmaNeural", "ur-PK-AsadNeural")
 
 _GROQ_TTS_DISABLED: dict[str, str] = {}
 _GROQ_TTS_DISABLE_LOCK = threading.Lock()
@@ -79,37 +84,109 @@ def _clean_text_safe(text: str, language: str) -> str:
 
     return t.strip()
 
-def _gtts_fallback(text: str, effective_lang: str, filename: str) -> str | None:
-    """Generate MP3 via Google TTS (gTTS) as fallback. Returns URL or None."""
+
+def _safe_remove(path: str) -> None:
+    try:
+        if os.path.isfile(path):
+            os.remove(path)
+    except OSError:
+        pass
+
+
+def _edge_tts_save_mp3(text: str, voice: str, filename: str) -> bool:
+    """Synthesize Urdu via Edge neural TTS (subprocess — safe with gevent workers)."""
+    _safe_remove(filename)
+    try:
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "edge_tts",
+                "--voice",
+                voice,
+                "--text",
+                text,
+                "--write-media",
+                filename,
+            ],
+            capture_output=True,
+            timeout=120,
+        )
+        if proc.returncode != 0:
+            err = (proc.stderr or b"").decode("utf-8", errors="replace")[:400]
+            logger.warning("[TTS] edge_tts failed voice=%s rc=%s err=%s", voice, proc.returncode, err)
+            _safe_remove(filename)
+            return False
+        ok = os.path.isfile(filename) and os.path.getsize(filename) > 0
+        if not ok:
+            _safe_remove(filename)
+        return ok
+    except Exception as e:
+        logger.warning("[TTS] edge_tts exception voice=%s: %s", voice, str(e)[:200])
+        _safe_remove(filename)
+        return False
+
+
+def _gtts_save(text: str, lang: str, tld: str | None, filename: str) -> str | None:
+    """Write MP3 via gTTS. Returns static URL or None."""
     try:
         from gtts import gTTS  # imported here so Groq-only installs still work
 
-        # Urdu must use `ur` (not Arabic) for understandable pronunciation.
-        # `com.pk` nudges pronunciation/style toward Pakistani locale.
-        if effective_lang == "ur":
-            tts_obj = gTTS(text=text, lang="ur", tld="com.pk", slow=False, lang_check=False)
-        else:
-            tts_obj = gTTS(text=text, lang="en", slow=False, lang_check=False)
+        _safe_remove(filename)
+        kwargs: dict = {"text": text, "lang": lang, "slow": False, "lang_check": False}
+        if tld:
+            kwargs["tld"] = tld
+        tts_obj = gTTS(**kwargs)
         tts_obj.save(filename)
 
         if not os.path.exists(filename) or os.path.getsize(filename) == 0:
             logger.error("[TTS] gTTS produced empty file: %s", filename)
+            _safe_remove(filename)
             return None
 
         url = "/static/" + os.path.basename(filename)
-        logger.info("[TTS] gTTS fallback success | %s", url)
+        logger.info("[TTS] gTTS success | lang=%s tld=%s | %s", lang, tld, url)
         return url
     except Exception as e:
-        logger.exception("[TTS] gTTS fallback failed: %s", e)
+        logger.exception("[TTS] gTTS failed lang=%s tld=%s: %s", lang, tld, e)
+        _safe_remove(filename)
         return None
 
 
-def _urdu_tts_preferred(text: str, filename: str) -> str | None:
+def _gtts_fallback(text: str, effective_lang: str, filename: str) -> str | None:
+    """Generate MP3 via Google TTS (gTTS) as fallback. Returns URL or None."""
+    if effective_lang == "ur":
+        # Try multiple endpoints — datacenter / regional quirks differ per host.
+        for tld in ("com", "com.pk", "co.uk"):
+            url = _gtts_save(text, "ur", tld, filename)
+            if url:
+                return url
+        return _gtts_save(text, "ur", None, filename)
+    return _gtts_save(text, "en", None, filename)
+
+
+def _urdu_tts_best_effort(text: str, filename: str) -> str | None:
     """
-    Preferred Urdu path for quality/clarity.
-    Uses native Urdu language synthesis before any Arabic-model fallback.
+    Urdu path optimized for clarity on Render and similar hosts:
+    1) Edge neural Urdu (Pakistan) — understandable without Groq model terms
+    2) gTTS Urdu with multiple TLD fallbacks
     """
-    return _gtts_fallback(text, "ur", filename)
+    voices_env = (os.environ.get("EDGE_TTS_URDU_VOICE") or "").strip()
+    voices = [voices_env] if voices_env else []
+    voices.extend(v for v in _DEFAULT_EDGE_UR_VOICES if v not in voices)
+
+    for voice in voices:
+        if not voice:
+            continue
+        if _edge_tts_save_mp3(text, voice, filename):
+            url = "/static/" + os.path.basename(filename)
+            logger.info("[TTS] Edge Urdu success | voice=%s | %s", voice, url)
+            return url
+
+    url = _gtts_fallback(text, "ur", filename)
+    if url:
+        return url
+    return None
 
 
 def generate_tts(text: str, language: str = "en") -> str | None:
@@ -145,9 +222,9 @@ def generate_tts(text: str, language: str = "en") -> str | None:
         voice = _VOICES.get(effective_lang, _VOICES["en"])
         filename = os.path.join(AUDIO_DIR, f"audio_{uuid.uuid4().hex}.mp3")
 
-        # Urdu quality path: use proper Urdu voice first for better intelligibility.
+        # Urdu: neural Edge + gTTS before Groq (Groq Orpheus often needs console terms).
         if effective_lang == "ur":
-            urdu_url = _urdu_tts_preferred(clean_text, filename)
+            urdu_url = _urdu_tts_best_effort(clean_text, filename)
             if urdu_url:
                 return urdu_url
 

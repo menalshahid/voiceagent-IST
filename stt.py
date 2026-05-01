@@ -13,13 +13,52 @@ Mobile compatibility:
 VAD pre-filter:
 - Runs vad.has_speech() before calling Whisper to skip silence-only recordings.
 """
-import os
 import re
 import logging
 
 from vad import has_speech
 
 logger = logging.getLogger(__name__)
+
+
+def _whisper_transcribe(client, data: bytes, fn: str, language: str | None) -> str:
+    """Single Whisper API call; returns stripped transcript text."""
+    if language == "en":
+        transcription = client.audio.transcriptions.create(
+            file=(fn, data),
+            model="whisper-large-v3-turbo",
+            language="en",
+            prompt=(
+                "IST Institute of Space Technology. BS Bachelor of Science. "
+                "Admissions, fee structure, transport, faculty, "
+                "electrical engineering, computer science, "
+                "department, program, engineering, Pakistan."
+            ),
+        )
+    elif language == "ur":
+        transcription = client.audio.transcriptions.create(
+            file=(fn, data),
+            model="whisper-large-v3-turbo",
+            language="ur",
+            prompt=(
+                "IST Institute of Space Technology. "
+                "BS اور MS، fee structure، admissions، transport، faculty۔ "
+                "انجینئرنگ، کمپیوٹر سائنس، الیکٹرانکس، اردو، پاکستان۔"
+            ),
+        )
+    else:
+        transcription = client.audio.transcriptions.create(
+            file=(fn, data),
+            model="whisper-large-v3-turbo",
+            prompt=(
+                "IST Institute of Space Technology. English or Urdu. "
+                "BS اور MS پروگرام، fee، admissions۔ انگریزی یا اردو۔"
+            ),
+        )
+
+    return (
+        transcription.text if hasattr(transcription, "text") else str(transcription)
+    ).strip()
 
 
 def transcribe_audio(audio_file, language: str | None = None) -> str:
@@ -40,8 +79,6 @@ def transcribe_audio(audio_file, language: str | None = None) -> str:
             fn = "audio.webm"
 
         # ── VAD pre-filter ────────────────────────────────────────────────────
-        # Skip the Whisper API call for silence-only or noise-only recordings.
-        # Build a minimal MIME hint from the file extension for format detection.
         _ext_to_mime = {
             "wav": "audio/wav",
             "webm": "audio/webm",
@@ -61,42 +98,17 @@ def transcribe_audio(audio_file, language: str | None = None) -> str:
 
         logger.info("STT [lang=%s, file=%s, size=%d bytes]", language, fn, len(data))
 
-        if language == "en":
-            transcription = client.audio.transcriptions.create(
-                file=(fn, data),
-                model="whisper-large-v3-turbo",
-                language="en",
-                prompt=(
-                    "IST Institute of Space Technology. BS Bachelor of Science. "
-                    "Admissions, fee structure, transport, faculty, "
-                    "electrical engineering, computer science, "
-                    "department, program, engineering, Pakistan."
-                ),
-            )
-        elif language == "ur":
-            # Fast turbo model + explicit Urdu (same speed class as English)
-            transcription = client.audio.transcriptions.create(
-                file=(fn, data),
-                model="whisper-large-v3-turbo",
-                language="ur",
-                prompt=(
-                    "IST Institute of Space Technology. "
-                    "BS اور MS، fee structure، admissions، transport، faculty۔ "
-                    "انجینئرنگ، کمپیوٹر سائنس، الیکٹرانکس، اردو، پاکستان۔"
-                ),
-            )
-        else:
-            # Language-selection turn: auto-detect (mixed Urdu + English)
-            transcription = client.audio.transcriptions.create(
-                file=(fn, data),
-                model="whisper-large-v3-turbo",
-                prompt=(
-                    "IST Institute of Space Technology. English or Urdu. "
-                    "BS اور MS پروگرام، fee، admissions۔ انگریزی یا اردو۔"
-                ),
-            )
+        text = _whisper_transcribe(client, data, fn, language)
 
-        text = (transcription.text if hasattr(transcription, "text") else str(transcription)).strip()
+        # Forced Urdu sometimes returns empty or junk on noisy audio — retry auto-detect once.
+        if language == "ur":
+            tl = text.lower()
+            weak = (len(text.strip()) < 2) or tl.startswith("sorry") or "could not understand" in tl
+            if weak:
+                alt = _whisper_transcribe(client, data, fn, None)
+                if len(alt.strip()) > len(text.strip()):
+                    logger.info("STT [lang=ur]: retry auto-detect improved result length %d→%d", len(text), len(alt))
+                    text = alt
 
         # ── English-mode post-processing only ────────────────────────────────
         if language == "en":
@@ -110,20 +122,15 @@ def transcribe_audio(audio_file, language: str | None = None) -> str:
             ):
                 text = re.sub(r"\bP\s*S\b", "BS", text, flags=re.I)
 
-        # ── Urdu: PRESERVE all text, minimal post-processing ────────────────
-        # Do NOT modify Urdu transcriptions - they're usually correct from Whisper
-
         logger.info("STT [lang=%s, result]: %s", language, repr(text)[:100])
         return text or "Sorry, I could not understand the audio."
 
     except Exception as e:
         logger.exception("STT error [lang=%s]: %s", language, e)
         error_msg = str(e).lower()
-        
-        # Provide specific error messages
+
         if "authentication" in error_msg or "api_key" in error_msg:
             return "Sorry, the speech service is not configured properly."
-        elif "timeout" in error_msg or "connection" in error_msg:
+        if "timeout" in error_msg or "connection" in error_msg:
             return "Sorry, the connection timed out. Please try again."
-        else:
-            return "Sorry, I could not understand the audio. Please try again."
+        return "Sorry, I could not understand the audio. Please try again."

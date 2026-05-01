@@ -30,7 +30,11 @@ _GREETING_TEXT = (
 
 # ── Language detection ────────────────────────────────────────────────────────
 
-_URDU_SIGNALS = ["urdu", "اردو", "urdoo", "urdo", "اردو میں", "urdu mein", "urdume"]
+_URDU_SIGNALS = [
+    "urdu", "urdoo", "urdo", "urdū",
+    "اردو", "اردو میں",
+    "urdu mein", "urdu main", "urdume", "pakistani urdu",
+]
 _ENGLISH_SIGNALS = ["english", "انگریزی", "eng ", "inglish", "inglis", "in english",
                     "english mein", "english me"]
 
@@ -74,9 +78,24 @@ def _get_call_state(call_id: str) -> dict:
         _calls[call_id] = state
     return state
 
+def _has_urdu_script(text: str) -> bool:
+    """True if text contains Arabic-script Urdu/Perso-Arabic letters."""
+    for ch in text:
+        o = ord(ch)
+        if 0x0600 <= o <= 0x06FF:
+            return True
+    return False
+
+
 def _detect_language(text: str) -> str | None:
     """Return 'ur', 'en', or None if choice is unclear."""
-    t = text.lower().strip()
+    raw = (text or "").strip()
+    if not raw:
+        return None
+    # User may speak full Urdu without saying the word "Urdu"
+    if _has_urdu_script(raw):
+        return "ur"
+    t = raw.lower()
     if any(s in t for s in _URDU_SIGNALS):
         return "ur"
     if any(s in t for s in _ENGLISH_SIGNALS):
