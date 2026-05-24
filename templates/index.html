@@ -152,6 +152,43 @@
       text-align: center;
       padding: 2rem 1rem;
     }
+
+    .metrics-panel {
+      margin-top: 1.25rem;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      overflow: hidden;
+      display: none;
+    }
+    .metrics-panel.visible { display: block; }
+    .metrics-panel h3 {
+      padding: 0.875rem 1rem;
+      font-size: 0.8125rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-muted);
+      background: var(--surface2);
+      border-bottom: 1px solid var(--border);
+    }
+    .metrics-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0.5rem 1rem;
+      padding: 1rem;
+      font-size: 0.875rem;
+    }
+    .metrics-grid .label { color: var(--text-muted); }
+    .metrics-grid .value { color: var(--text); font-weight: 600; text-align: right; }
+    .metrics-grid .value.good { color: var(--green); }
+    .metrics-grid .value.warn { color: #f59e0b; }
+    .metrics-grid .value.bad  { color: var(--red); }
+    .metrics-foot {
+      padding: 0.5rem 1rem 0.875rem;
+      font-size: 0.75rem;
+      color: var(--text-muted);
+    }
   </style>
 </head>
 <body>
@@ -179,6 +216,12 @@
       <div class="transcript-list" id="transcriptList">
         <div class="empty-state" id="emptyState">No conversation yet. Start a call and speak.</div>
       </div>
+    </div>
+
+    <div class="metrics-panel" id="metricsPanel">
+      <h3>Call Results</h3>
+      <div class="metrics-grid" id="metricsGrid"></div>
+      <div class="metrics-foot" id="metricsFoot"></div>
     </div>
   </div>
 

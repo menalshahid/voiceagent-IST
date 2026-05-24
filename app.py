@@ -13,6 +13,7 @@ import rag
 from rag import answer_question
 from tts import generate_tts, AUDIO_DIR
 from stt import transcribe_audio
+import metrics
 
 app = Flask(__name__)
 
@@ -166,12 +167,26 @@ def greeting():
     return jsonify({"audio": audio or "", "text": _GREETING_TEXT})
 
 
+@app.route("/api/call/metrics")
+def call_metrics():
+    """Return live metrics for a call (used by frontend after End Call)."""
+    call_id = _get_call_id(request)
+    return jsonify(metrics.summary(call_id))
+
+
+@app.route("/api/metrics/recent")
+def call_metrics_recent():
+    """Recently completed call summaries (small in-memory ring)."""
+    return jsonify({"calls": metrics.recent()})
+
+
 @app.route("/api/call/end", methods=["POST"])
 def call_end():
     """Reset per-call state and clean up old TTS audio files."""
     import glob
     call_id = _get_call_id(request, request.get_json(silent=True) or {})
     _calls.pop(call_id, None)
+    final_metrics = metrics.end_call(call_id)
 
     # Cleanup old audio files
     try:
@@ -186,7 +201,7 @@ def call_end():
     except Exception:
         pass
 
-    return jsonify({"ok": True})
+    return jsonify({"ok": True, "metrics": final_metrics})
 
 
 @app.route("/api/call/audio", methods=["POST"])
@@ -202,6 +217,11 @@ def call_audio():
     call_state = _get_call_state(call_id)
     call_history = call_state["history"]
     call_language = call_state["language"]
+
+    turn_timer = metrics.Timer()
+    stt_ms = llm_ms = tts_ms = 0.0
+    kb_answered_turn = False
+    metrics.start_call(call_id)
 
     if request.is_json:
         transcript = (body.get("text") or "").strip()
@@ -223,7 +243,9 @@ def call_audio():
         else:
             stt_lang = None  # auto-detect
 
+        stt_timer = metrics.Timer()
         transcript = transcribe_audio(audio_file, language=stt_lang)
+        stt_ms = stt_timer.ms()
 
     # Graceful handling of empty/failed STT — prompt user to repeat
     if not transcript or "sorry" in transcript.lower():
@@ -232,7 +254,14 @@ def call_audio():
             if call_language == "ur"
             else "Sorry, I couldn’t hear you clearly. Please say that again."
         )
+        tts_timer = metrics.Timer()
         audio_url = _speak(reprompt, call_language or "en")
+        tts_ms = tts_timer.ms()
+        metrics.record_turn(
+            call_id, stt_ms=stt_ms, tts_ms=tts_ms,
+            e2e_ms=turn_timer.ms(), error=True,
+            vad_silence=(not transcript),
+        )
         return jsonify({
             "transcript": "",
             "reply": reprompt,
@@ -254,7 +283,13 @@ def call_audio():
                 if call_language == "ur"
                 else "Sorry, I couldn’t catch a clear question. Please ask again."
             )
+            tts_timer = metrics.Timer()
             audio_url = _speak(reprompt, call_language or "en")
+            tts_ms = tts_timer.ms()
+            metrics.record_turn(
+                call_id, stt_ms=stt_ms, tts_ms=tts_ms,
+                e2e_ms=turn_timer.ms(), error=True,
+            )
             return jsonify({
                 "transcript": transcript,
                 "reply": reprompt,
@@ -268,8 +303,12 @@ def call_audio():
 
         if chosen == "ur":
             call_state["language"] = "ur"
+            metrics.set_language(call_id, "ur")
             reply = "جی بالکل، میں اب آپ کی رہنمائی اردو میں کروں گی۔ براہِ کرم اپنا سوال بتائیں۔"
+            tts_timer = metrics.Timer()
             audio_url = _speak(reply, "ur")
+            tts_ms = tts_timer.ms()
+            metrics.record_turn(call_id, stt_ms=stt_ms, tts_ms=tts_ms, e2e_ms=turn_timer.ms())
             return jsonify({
                 "transcript": transcript,
                 "reply": reply,
@@ -279,8 +318,12 @@ def call_audio():
 
         if chosen == "en":
             call_state["language"] = "en"
+            metrics.set_language(call_id, "en")
             reply = "Perfect, I’ll assist you in English. Please tell me your question."
+            tts_timer = metrics.Timer()
             audio_url = _speak(reply, "en")
+            tts_ms = tts_timer.ms()
+            metrics.record_turn(call_id, stt_ms=stt_ms, tts_ms=tts_ms, e2e_ms=turn_timer.ms())
             return jsonify({
                 "transcript": transcript,
                 "reply": reply,
@@ -293,7 +336,13 @@ def call_audio():
             "Sorry, I didn’t catch your language choice. "
             "Please say English or Urdu. براہِ کرم English یا Urdu کہیں۔"
         )
+        tts_timer = metrics.Timer()
         audio_url = _speak(reply, "en")
+        tts_ms = tts_timer.ms()
+        metrics.record_turn(
+            call_id, stt_ms=stt_ms, tts_ms=tts_ms,
+            e2e_ms=turn_timer.ms(), error=True,
+        )
         return jsonify({
             "transcript": transcript,
             "reply": reply,
@@ -303,25 +352,47 @@ def call_audio():
 
     # ── Normal Q&A turn ───────────────────────────────────────────────────────
     lang = call_state["language"]  # "en" or "ur"
+    metrics.set_language(call_id, lang)
+
+    llm_timer = metrics.Timer()
     kind, response = answer_question(transcript, history=list(call_history), language=lang)
+    llm_ms = llm_timer.ms()
+    kb_answered_turn = bool(response) and kind != "__END_CALL__"
 
     if response:
         call_history.append({"role": "user",      "content": transcript})
         call_history.append({"role": "assistant",  "content": response})
         if len(call_history) > _MAX_HISTORY_TURNS * 2:
             call_history[:] = call_history[-(_MAX_HISTORY_TURNS * 2):]
+        tts_timer = metrics.Timer()
         audio_url = _speak(response, lang)
+        tts_ms = tts_timer.ms()
     else:
         audio_url = None
 
     if kind == "__END_CALL__":
         _calls.pop(call_id, None)
 
+    metrics.record_turn(
+        call_id,
+        stt_ms=stt_ms,
+        llm_ms=llm_ms,
+        tts_ms=tts_ms,
+        e2e_ms=turn_timer.ms(),
+        kb_answered=kb_answered_turn,
+    )
+
     return jsonify({
         "transcript": transcript,
         "reply": response or "",
         "audio": audio_url or "",
         "end_call": kind == "__END_CALL__",
+        "timings_ms": {
+            "stt": round(stt_ms, 1),
+            "llm": round(llm_ms, 1),
+            "tts": round(tts_ms, 1),
+            "e2e": round(turn_timer.ms(), 1),
+        },
     })
 
 @app.route("/api/admin/reload-kb", methods=["POST"])

@@ -288,6 +288,8 @@ async function startCall() {
     if (!callId) callId = newCallId();
     retryCount = 0;
     startBtn.disabled = true;
+    const metricsPanel = document.getElementById("metricsPanel");
+    if (metricsPanel) metricsPanel.classList.remove("visible");
     updateStatus("Initializing...");
 
     stream = await navigator.mediaDevices.getUserMedia({
@@ -369,8 +371,9 @@ async function endCall() {
 
   updateStatus("Ending call...");
 
+  let finalMetrics = null;
   try {
-    await Promise.race([
+    const endResp = await Promise.race([
       fetch("/api/call/end", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -378,16 +381,61 @@ async function endCall() {
       }),
       new Promise((_, reject) => setTimeout(() => reject(new Error("Timeout")), 3000))
     ]);
+    const j = await endResp.json().catch(() => null);
+    if (j && j.metrics) finalMetrics = j.metrics;
   } catch (_) {}
 
+  if (finalMetrics) renderMetrics(finalMetrics);
+
+  const endedCallId = callId;
   callId = newCallId();
   startBtn.style.display = "inline-flex";
   endBtn.style.display = "none";
   startBtn.disabled = false;
-  updateStatus("Call ended. Click Start to begin again.");
+  updateStatus("Call ended. See call results below.");
 
   transcriptList.innerHTML = '<div class="empty-state">No conversation yet. Start a call and speak.</div>';
   emptyState = transcriptList.querySelector(".empty-state");
+  void endedCallId;
+}
+
+function renderMetrics(m) {
+  const panel = document.getElementById("metricsPanel");
+  const grid = document.getElementById("metricsGrid");
+  const foot = document.getElementById("metricsFoot");
+  if (!panel || !grid) return;
+
+  const fmtMs = (v) => v == null ? "—" : `${Math.round(v)} ms`;
+  const fmtPct = (v) => v == null ? "—" : `${v}%`;
+  const fmtLang = (v) => v === "ur" ? "Urdu" : v === "en" ? "English" : "—";
+
+  const e2e = m.e2e_avg_ms;
+  const e2eClass = e2e == null ? "" : e2e < 2500 ? "good" : e2e < 4000 ? "warn" : "bad";
+
+  const kb = m.kb_resolution_rate_pct;
+  const kbClass = kb == null ? "" : kb >= 80 ? "good" : kb >= 60 ? "warn" : "bad";
+
+  const rows = [
+    ["Language",              fmtLang(m.language)],
+    ["Turns",                 String(m.turns ?? 0)],
+    ["End-to-End Latency (avg)", fmtMs(m.e2e_avg_ms), e2eClass],
+    ["End-to-End Latency (p95)", fmtMs(m.e2e_p95_ms)],
+    ["STT Response (avg)",    fmtMs(m.stt_avg_ms)],
+    ["LLM Response (avg)",    fmtMs(m.llm_avg_ms)],
+    ["TTS Output (avg)",      fmtMs(m.tts_avg_ms)],
+    ["KB Resolution Rate",    fmtPct(m.kb_resolution_rate_pct), kbClass],
+    ["VAD Silence Skipped",   String(m.vad_silence_skipped ?? 0)],
+    ["Errors",                String(m.errors ?? 0)],
+    ["Call Duration",         m.duration_s == null ? "—" : `${m.duration_s} s`],
+  ];
+
+  grid.innerHTML = rows.map(([label, value, cls]) =>
+    `<div class="label">${label}</div>` +
+    `<div class="value ${cls || ""}">${value}</div>`
+  ).join("");
+
+  foot.textContent = `Call ID: ${m.call_id || "—"}`;
+  panel.classList.add("visible");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
