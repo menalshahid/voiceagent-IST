@@ -1,8 +1,8 @@
-"""Text-to-speech using Groq API - PRODUCTION HARDENED.
-✓ Works reliably from cloud/datacenter environments (no IP blocking)
-✓ Urdu text preserved perfectly
-✓ Caching for greeting (massive latency reduction)
-✓ Error recovery with fallback
+"""Text-to-speech — human-like neural voices (Edge TTS) with gTTS fallback.
+
+English: en-US neural (Jenny/Aria)
+Urdu:    ur-PK neural (Uzma/Asad)
+Groq Orpheus used only if Edge + gTTS fail and API terms are accepted.
 """
 import uuid
 import os
@@ -16,42 +16,46 @@ from groq import BadRequestError as GroqBadRequestError, NotFoundError as GroqNo
 from groq_utils import get_client, get_next_key_index, GROQ_KEYS
 
 logger = logging.getLogger(__name__)
-# Use absolute path so audio files are always written to the right directory
-# regardless of the working directory when gunicorn starts on Render.
 _APP_DIR = os.path.dirname(os.path.abspath(__file__))
 AUDIO_DIR = os.path.join(_APP_DIR, "static")
 
-# Groq TTS models and voices.
-# playai-tts / playai-tts-arabic were decommissioned 2025-12-23.
-# Replacement: Orpheus TTS (canopylabs/orpheus-v1-*).
-# Urdu uses orpheus-v1-arabic: Urdu script is derived from Arabic/Perso-Arabic
-# script, so Groq's Arabic TTS model handles Urdu phonetics correctly.
+# Slightly slower rate = more natural helpline pacing (override via EDGE_TTS_RATE env).
+_DEFAULT_EDGE_RATE = os.environ.get("EDGE_TTS_RATE", "-6%").strip() or "-6%"
+
+# Natural US English neural voices (female first — clear helpline tone).
+_DEFAULT_EDGE_EN_VOICES = (
+    "en-US-JennyNeural",
+    "en-US-AriaNeural",
+    "en-US-GuyNeural",
+)
+
+# Pakistani Urdu neural voices.
+_DEFAULT_EDGE_UR_VOICES = (
+    "ur-PK-UzmaNeural",
+    "ur-PK-AsadNeural",
+)
+
 _TTS_MODELS = {
     "en": "canopylabs/orpheus-v1-english",
     "ur": "canopylabs/orpheus-v1-arabic",
 }
-
-_VOICES = {
-    "en": "leo",
-    "ur": "jad",
-}
-
-# Pakistani Urdu neural voices (Microsoft Edge TTS — free, clear on cloud hosts).
-_DEFAULT_EDGE_UR_VOICES = ("ur-PK-UzmaNeural", "ur-PK-AsadNeural")
+_VOICES = {"en": "leo", "ur": "jad"}
 
 _GROQ_TTS_DISABLED: dict[str, str] = {}
 _GROQ_TTS_DISABLE_LOCK = threading.Lock()
 
+
 def _disable_groq_tts(language: str, reason: str) -> None:
-    """Disable Groq TTS for a language after non-retryable errors."""
     with _GROQ_TTS_DISABLE_LOCK:
         if language in _GROQ_TTS_DISABLED:
             return
         _GROQ_TTS_DISABLED[language] = reason
     logger.warning("[TTS] Groq TTS disabled for lang=%s: %s", language, reason)
 
+
 def _get_groq_tts_disable_reason(language: str) -> str | None:
     return _GROQ_TTS_DISABLED.get(language)
+
 
 def _should_disable_groq_tts(err: Exception) -> str | None:
     message = str(err).lower()
@@ -61,28 +65,30 @@ def _should_disable_groq_tts(err: Exception) -> str | None:
         return "model not available for this API key"
     return None
 
+
 def _is_urdu_text(text: str) -> bool:
-    """Check if text contains Urdu script characters."""
     for char in str(text):
-        code = ord(char)
-        if 0x0600 <= code <= 0x06FF:
+        if 0x0600 <= ord(char) <= 0x06FF:
             return True
     return False
 
+
 def _clean_text_safe(text: str, language: str) -> str:
-    """
-    Clean text ONLY of metadata markers - preserve everything else.
-    NEVER corrupt Urdu diacritics or script.
-    """
     t = str(text).strip()
-
-    # Remove ONLY [TOPIC:...] markers
     t = re.sub(r'\[TOPIC:[^\]]*\]\s*', '', t)
-
-    # Remove ONLY PAGE/TOPIC headers at line start
     t = re.sub(r'^(PAGE|TOPIC)\s*:\s*[^\n]*\n?', '', t, flags=re.MULTILINE)
-
     return t.strip()
+
+
+def _humanize_for_speech(text: str, lang: str) -> str:
+    """Light normalization so TTS sounds more natural on a phone call."""
+    t = re.sub(r"\s+", " ", text).strip()
+    t = re.sub(r"\s+([,.!?;:])", r"\1", t)
+    if lang == "en":
+        t = re.sub(r"\bRs\.?\s*", "rupees ", t, flags=re.I)
+        t = re.sub(r"\bPKR\s*", "Pakistani rupees ", t, flags=re.I)
+        t = re.sub(r"\b(\d{3,4})-(\d{4,7})\b", r"\1 \2", t)
+    return t
 
 
 def _safe_remove(path: str) -> None:
@@ -93,25 +99,30 @@ def _safe_remove(path: str) -> None:
         pass
 
 
-def _edge_tts_save_mp3(text: str, voice: str, filename: str) -> bool:
-    """Synthesize Urdu via Edge neural TTS (subprocess — safe with gevent workers)."""
+def _edge_tts_save_mp3(
+    text: str,
+    voice: str,
+    filename: str,
+    rate: str | None = None,
+) -> bool:
+    """Microsoft Edge neural TTS via CLI (works on Render; gevent-safe)."""
     _safe_remove(filename)
+    rate = rate or _DEFAULT_EDGE_RATE
+    cmd = [
+        sys.executable,
+        "-m",
+        "edge_tts",
+        "--voice",
+        voice,
+        "--rate",
+        rate,
+        "--text",
+        text,
+        "--write-media",
+        filename,
+    ]
     try:
-        proc = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "edge_tts",
-                "--voice",
-                voice,
-                "--text",
-                text,
-                "--write-media",
-                filename,
-            ],
-            capture_output=True,
-            timeout=120,
-        )
+        proc = subprocess.run(cmd, capture_output=True, timeout=120)
         if proc.returncode != 0:
             err = (proc.stderr or b"").decode("utf-8", errors="replace")[:400]
             logger.warning("[TTS] edge_tts failed voice=%s rc=%s err=%s", voice, proc.returncode, err)
@@ -128,126 +139,87 @@ def _edge_tts_save_mp3(text: str, voice: str, filename: str) -> bool:
 
 
 def _gtts_save(text: str, lang: str, tld: str | None, filename: str) -> str | None:
-    """Write MP3 via gTTS. Returns static URL or None."""
     try:
-        from gtts import gTTS  # imported here so Groq-only installs still work
+        from gtts import gTTS
 
         _safe_remove(filename)
         kwargs: dict = {"text": text, "lang": lang, "slow": False, "lang_check": False}
         if tld:
             kwargs["tld"] = tld
-        tts_obj = gTTS(**kwargs)
-        tts_obj.save(filename)
-
-        if not os.path.exists(filename) or os.path.getsize(filename) == 0:
-            logger.error("[TTS] gTTS produced empty file: %s", filename)
+        gTTS(**kwargs).save(filename)
+        if not os.path.isfile(filename) or os.path.getsize(filename) == 0:
             _safe_remove(filename)
             return None
-
         url = "/static/" + os.path.basename(filename)
         logger.info("[TTS] gTTS success | lang=%s tld=%s | %s", lang, tld, url)
         return url
     except Exception as e:
-        logger.exception("[TTS] gTTS failed lang=%s tld=%s: %s", lang, tld, e)
+        logger.exception("[TTS] gTTS failed lang=%s: %s", lang, e)
         _safe_remove(filename)
         return None
 
 
 def _gtts_fallback(text: str, effective_lang: str, filename: str) -> str | None:
-    """Generate MP3 via Google TTS (gTTS) as fallback. Returns URL or None."""
     if effective_lang == "ur":
-        # Try multiple endpoints — datacenter / regional quirks differ per host.
         for tld in ("com", "com.pk", "co.uk"):
             url = _gtts_save(text, "ur", tld, filename)
             if url:
                 return url
         return _gtts_save(text, "ur", None, filename)
-    return _gtts_save(text, "en", None, filename)
+    return _gtts_save(text, "en", "com", filename)
 
 
-def _urdu_tts_best_effort(text: str, filename: str) -> str | None:
-    """
-    Urdu path optimized for clarity on Render and similar hosts:
-    1) Edge neural Urdu (Pakistan) — understandable without Groq model terms
-    2) gTTS Urdu with multiple TLD fallbacks
-    """
-    voices_env = (os.environ.get("EDGE_TTS_URDU_VOICE") or "").strip()
-    voices = [voices_env] if voices_env else []
-    voices.extend(v for v in _DEFAULT_EDGE_UR_VOICES if v not in voices)
+def _edge_voices_for_lang(lang: str) -> list[str]:
+    if lang == "ur":
+        custom = (os.environ.get("EDGE_TTS_URDU_VOICE") or "").strip()
+        voices = [custom] if custom else []
+        voices.extend(v for v in _DEFAULT_EDGE_UR_VOICES if v not in voices)
+    else:
+        custom = (os.environ.get("EDGE_TTS_ENGLISH_VOICE") or "").strip()
+        voices = [custom] if custom else []
+        voices.extend(v for v in _DEFAULT_EDGE_EN_VOICES if v not in voices)
+    return [v for v in voices if v]
 
-    for voice in voices:
-        if not voice:
-            continue
+
+def _neural_tts_best_effort(text: str, filename: str, lang: str) -> str | None:
+    """Primary path: Edge neural voices (human-like), then gTTS."""
+    for voice in _edge_voices_for_lang(lang):
         if _edge_tts_save_mp3(text, voice, filename):
             url = "/static/" + os.path.basename(filename)
-            logger.info("[TTS] Edge Urdu success | voice=%s | %s", voice, url)
+            logger.info("[TTS] Edge neural success | lang=%s voice=%s | %s", lang, voice, url)
             return url
-
-    url = _gtts_fallback(text, "ur", filename)
-    if url:
-        return url
-    return None
+    return _gtts_fallback(text, lang, filename)
 
 
 def generate_tts(text: str, language: str = "en") -> str | None:
-    """
-    Generate MP3 from text using Groq TTS API.
-    Returns URL path like /static/audio_xxx.mp3.
-
-    PRODUCTION HARDENED:
-    Validates input, preserves Urdu text, returns None on failure,
-    verifies file exists before returning URL.
-    """
-
     if not text or not str(text).strip():
         return None
 
     try:
         os.makedirs(AUDIO_DIR, exist_ok=True)
-
         clean_text = _clean_text_safe(text, language)
-
         if not clean_text or len(clean_text.strip()) < 2:
-            logger.warning("[TTS] Text became empty after cleaning, using original")
             clean_text = str(text).strip()
-
         if len(clean_text) > 2000:
-            logger.warning("[TTS] Text truncated from %d to 1997 chars", len(clean_text))
             clean_text = clean_text[:1997] + "..."
 
         is_urdu = language == "ur" or _is_urdu_text(clean_text)
         effective_lang = "ur" if is_urdu else "en"
+        clean_text = _humanize_for_speech(clean_text, effective_lang)
 
-        model = _TTS_MODELS.get(effective_lang, _TTS_MODELS["en"])
-        voice = _VOICES.get(effective_lang, _VOICES["en"])
         filename = os.path.join(AUDIO_DIR, f"audio_{uuid.uuid4().hex}.mp3")
 
-        # Urdu: neural Edge + gTTS before Groq (Groq Orpheus often needs console terms).
-        if effective_lang == "ur":
-            urdu_url = _urdu_tts_best_effort(clean_text, filename)
-            if urdu_url:
-                return urdu_url
+        # Always prefer human-like Edge neural voices (EN + UR).
+        neural_url = _neural_tts_best_effort(clean_text, filename, effective_lang)
+        if neural_url:
+            return neural_url
 
         disable_reason = _get_groq_tts_disable_reason(effective_lang)
-        if disable_reason:
-            logger.info(
-                "[TTS] Groq TTS disabled for lang=%s (%s); using gTTS",
-                effective_lang,
-                disable_reason,
-            )
+        if disable_reason or not GROQ_KEYS:
             return _gtts_fallback(clean_text, effective_lang, filename)
 
-        if not GROQ_KEYS:
-            logger.warning("[TTS] GROQ_API_KEY(S) not configured; using gTTS fallback")
-            return _gtts_fallback(clean_text, effective_lang, filename)
-
-        logger.info(
-            "[TTS] Generating | lang=%s | urdu=%s | model=%s | voice=%s | len=%d | file=%s",
-            language, is_urdu, model, voice, len(clean_text), filename
-        )
-
-        # All exceptions (network errors, rate limits, invalid credentials, read failures)
-        # are caught by the outer try-except which logs and returns None.
+        model = _TTS_MODELS[effective_lang]
+        voice = _VOICES[effective_lang]
         client = get_client(get_next_key_index())
         try:
             response = client.audio.speech.create(
@@ -258,61 +230,39 @@ def generate_tts(text: str, language: str = "en") -> str | None:
             )
             audio_bytes = response.read()
         except (GroqBadRequestError, GroqNotFoundError) as groq_err:
-            logger.warning(
-                "[TTS] Groq error (%s) for lang=%s, falling back to gTTS: %s",
-                type(groq_err).__name__, language, str(groq_err)[:200],
-            )
             disable_reason = _should_disable_groq_tts(groq_err)
             if disable_reason:
                 _disable_groq_tts(effective_lang, disable_reason)
             return _gtts_fallback(clean_text, effective_lang, filename)
 
         if not audio_bytes:
-            logger.error("[TTS] Groq returned empty audio")
             return None
-
         with open(filename, "wb") as f:
             f.write(audio_bytes)
-
-        if not os.path.exists(filename):
-            logger.error("[TTS] File not created: %s", filename)
-            return None
-
-        file_size = os.path.getsize(filename)
-        if file_size == 0:
-            logger.error("[TTS] File is empty: %s", filename)
+        if os.path.getsize(filename) == 0:
             os.remove(filename)
             return None
-
-        url = "/static/" + os.path.basename(filename)
-        logger.info("[TTS] Success | %d bytes | %s", file_size, url)
-        return url
+        return "/static/" + os.path.basename(filename)
 
     except Exception as e:
         logger.exception("[TTS] Error (language=%s): %s", language, str(e)[:100])
         return None
 
 
-# ── Greeting prefetch cache ───────────────────────────────────────────────────
-
 _greeting_cache = {}
 
-def prefetch_greeting(text: str, language: str = "en") -> None:
-    """Call at app startup to generate greeting audio in background."""
 
+def prefetch_greeting(text: str, language: str = "en") -> None:
     def _gen():
         try:
             url = generate_tts(text, language=language)
             if url:
                 _greeting_cache[language] = url
-                logger.info("[TTS] Greeting prefetched: %s", url)
         except Exception as e:
             logger.warning("[TTS] Greeting prefetch failed: %s", e)
 
-    thread = threading.Thread(target=_gen, daemon=True)
-    thread.start()
+    threading.Thread(target=_gen, daemon=True).start()
 
 
 def get_cached_greeting(language: str = "en") -> str | None:
-    """Get prefetched greeting URL or None."""
     return _greeting_cache.get(language)

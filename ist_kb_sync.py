@@ -25,6 +25,7 @@ from pathlib import Path
 # ── Defaults (edit or set IST_SCRAPE_URLS as comma-separated URLs) ────────────
 DEFAULT_URLS = [
     "https://ist.edu.pk/",
+    "https://ist.edu.pk/news-events",
     "https://ist.edu.pk/admission",
     "https://ist.edu.pk/admission?section=general-eligibility",
     "https://ist.edu.pk/admission?section=entry-test",
