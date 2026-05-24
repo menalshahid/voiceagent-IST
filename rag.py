@@ -13,6 +13,7 @@ import re
 import logging
 
 from rag_kb_loader import build_kb_index, bm25_score as _bm25_loader
+import faculty_lookup
 
 logger = logging.getLogger(__name__)
 
@@ -56,10 +57,12 @@ def reload_kb(path: str = "all_kb.txt") -> None:
     with open(path, encoding="utf-8") as f:
         raw = f.read()
     _apply_kb_index(build_kb_index(raw))
+    faculty_lookup.reload(path)
     logger.info("KB reloaded from %s", path)
 
 
 _apply_kb_index(build_kb_index(open("all_kb.txt", encoding="utf-8").read()))
+faculty_lookup.reload("all_kb.txt")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 2. Helpers
@@ -126,6 +129,9 @@ _QUERY_EXPANSION_HINTS: tuple[tuple[str, list[str]], ...] = (
     ("الیکٹریکل", ["electrical", "engineering", "fee", "semester"]),
     ("انجینئر", ["engineering", "program", "fee"]),
     ("کمپیوٹر", ["computer", "computing", "program", "fee"]),
+    ("computing department", ["computing", "computer", "faculty", "department", "science"]),
+    ("computer science", ["computer", "computing", "faculty", "science", "department"]),
+    ("faculty", ["faculty", "professor", "lecturer", "designation", "department", "hod"]),
 )
 
 def _expand(query: str) -> list[str]:
@@ -207,7 +213,7 @@ _SYSTEM_EN = """You are the IST (Institute of Space Technology) admissions helpl
 
 RULES:
 1. Use the provided context as your ONLY source of facts. Never invent figures, dates, names, or contact details not present in context.
-2. Speak in clear, natural, human English suitable for a live Pakistani admissions helpline call. Keep replies concise (2-4 sentences).
+2. Speak in clear, warm, natural English like a helpful Pakistani university helpline agent on a phone call. Use short sentences. For long lists (faculty), group by designation and read smoothly.
 3. No bullet points, numbered lists, markdown, or headers.
 4. Never say "[TOPIC:]", "PAGE:", or any internal label.
 5. Always include relevant contact details when present in context:
@@ -215,21 +221,21 @@ RULES:
    - Fee questions → state the TOTAL per-semester figure and one-time charges.
    - Contact/personnel questions → give the phone number and/or email.
 6. For fee questions: give the specific program's total per-semester amount; state the actual figure.
-7. For faculty questions: list the faculty members found in context by name and designation.
+7. For faculty questions: ONLY list people under the exact department section in context (e.g. "Department of Computer Science" for Computing). Never mix faculty from other departments. Include designation/rank exactly as written. If a name is not in that department block, do not mention it.
 8. KB-ONLY ANSWERS — if the context does not contain the answer, say: "I don't have that specific detail in my records. Please contact IST admissions at 051-9075100 or email admissions@ist.edu.pk for accurate information." Do NOT guess, infer, or state any fact not explicitly in the provided context.
 9. Use a polite, confident, and helpful tone. Do not start with "Based on the context".
 10. Never begin with meta phrases like "The answer to your question is" or "The answer is that" — start directly with the information.
 11. MERIT SCHOLARSHIPS — use ONLY figures and rules from context. Awards are rank-based (e.g. top three per BS discipline, top two per MS program in context): explain that eligible students must meet published minimum SGPA/CGPA AND compete for limited positions. If the caller gives a GPA and context gives a minimum threshold, compare correctly: e.g. 4.0 is above 3.75 — do NOT say they fail eligibility. Never invent GPA cutoffs not in context. Never tell someone they "cannot" get a merit scholarship just because you mis-compare numbers; say they meet the stated minimum if they do, and that final awards depend on semester ranking among eligible students.
 12. KICSIT — context says KICSIT is at Kahuta (Rawalpindi area), not Karachi city. Director Incharge named in context is Engr. Masood Khalid. If the user says "Karachi campus" for KICSIT, politely clarify location and give the director from context."""
 
-_SYSTEM_UR = """آپ IST (Institute of Space Technology) کے admissions helpline assistant ہیں اور ایک live phone call پر ہیں۔
+_SYSTEM_UR = """You are the IST admissions helpline assistant on a live phone call. Reply in ROMAN URDU only (Latin script), e.g. "Computing department ke faculty yeh hain: ..." — natural Pakistani spoken style. Do NOT use Urdu/Nastaliq script in your reply.
 
 اہم ہدایات:
 1. جواب دینے کے لیے صرف اور صرف فراہم کردہ context استعمال کریں۔ کوئی بھی figure، تاریخ، نام، یا contact detail جو context میں نہ ہو، وہ کبھی بھی خود سے نہ بنائیں۔
-2. ہمیشہ نرم، باادب اور قدرتی پاکستانی اردو میں جواب دیں، جیسے کال سینٹر کا تربیت یافتہ نمائندہ بات کرتا ہے۔ یہ voice call ہے، اس لیے جواب 2 سے 4 جملوں میں رکھیں۔
+2. Roman Urdu میں نرم، باادب اور قدرتی انداز میں جواب دیں۔ Technical terms (BS, MS, NAT, email) English میں رکھ سکتے ہیں۔ Voice call ہے — مختصر اور واضح رہیں؛ لمبی faculty list ho to designation ke sath group kar ke bolen.
 3. Bullet points، numbered lists، یا markdown استعمال نہ کریں۔
 4. "[TOPIC:]" یا "PAGE:" جیسے internal labels کبھی نہ بولیں۔
-5. Technical terms جیسے BS، MS، NAT، ECAT، fee structure، merit list، GPA وغیرہ انگریزی میں رکھیں، مگر پورا جواب روان، شفاف اور عام فہم پاکستانی اردو میں دیں۔
+5. Faculty سوالات: sirf us department ke log jo context ke usi section میں ہیں — doosre department ke names kabhi na milayen.
 6. اگر context میں contact details موجود ہوں تو ضرور بتائیں:
    - Transport سوالات → 03000544707 نمبر بتائیں۔
    - Fee سوالات → کل per-semester رقم اور one-time charges بتائیں۔
@@ -297,8 +303,21 @@ def answer_question(
         )
         return ("__REPLY__", msg)
 
+    direct = faculty_lookup.try_faculty_answer(q, language)
+    if direct:
+        return ("__REPLY__", direct)
+
     context = retrieve(q)
+    # Pin computing faculty chunk when relevant
+    dept = faculty_lookup.detect_department(q)
+    if dept and faculty_lookup.get_department_members(dept):
+        pin = f"## DEPARTMENT: {dept}\n"
+        for m in faculty_lookup.get_department_members(dept)[:35]:
+            pin += f"Name: {m.get('name','')}\nDesignation: {m.get('designation','')}\n"
+        context = pin + "\n\n" + context
+
     system  = _SYSTEM_UR if language == "ur" else _SYSTEM_EN
+    max_tok = 450 if faculty_lookup.is_faculty_list_query(q) else 220
 
     try:
         from groq_utils import get_client
@@ -315,8 +334,8 @@ def answer_question(
         resp = client.chat.completions.create(
             model="llama-3.1-8b-instant",
             messages=messages,
-            max_tokens=220,
-            temperature=0.1,
+            max_tokens=max_tok,
+            temperature=0.05,
         )
         reply = resp.choices[0].message.content.strip()
         reply = re.sub(r"\[TOPIC:[^\]]+\]\s*", "", reply).strip()

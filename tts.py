@@ -203,8 +203,14 @@ def generate_tts(text: str, language: str = "en") -> str | None:
         if len(clean_text) > 2000:
             clean_text = clean_text[:1997] + "..."
 
-        is_urdu = language == "ur" or _is_urdu_text(clean_text)
-        effective_lang = "ur" if is_urdu else "en"
+        is_urdu_script = _is_urdu_text(clean_text)
+        # Roman Urdu (Latin) sounds natural with English neural voice.
+        if language == "ur" and not is_urdu_script:
+            effective_lang = "en"
+        elif language == "ur" or is_urdu_script:
+            effective_lang = "ur"
+        else:
+            effective_lang = "en"
         clean_text = _humanize_for_speech(clean_text, effective_lang)
 
         filename = os.path.join(AUDIO_DIR, f"audio_{uuid.uuid4().hex}.mp3")

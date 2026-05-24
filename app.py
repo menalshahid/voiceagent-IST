@@ -36,8 +36,15 @@ _URDU_SIGNALS = [
     "اردو", "اردو میں",
     "urdu mein", "urdu main", "urdume", "pakistani urdu",
 ]
-_ENGLISH_SIGNALS = ["english", "انگریزی", "eng ", "inglish", "inglis", "in english",
-                    "english mein", "english me"]
+_ENGLISH_SIGNALS = [
+    "english", "انگریزی", "eng ", "inglish", "inglis", "in english",
+    "english mein", "english me", "angrezi", "angrez",
+]
+# STT often drops letters: "englis", "englsh", etc.
+_ENGLISH_FUZZY_RE = re.compile(
+    r"^(eng\w{0,6}|inglish|inglis|angrezi|angrez|en)$",
+    re.I,
+)
 
 # Treat underscores as non-meaningful symbols (same as punctuation/noise),
 # while preserving all Unicode letters (including Urdu) as meaningful content.
@@ -96,10 +103,13 @@ def _detect_language(text: str) -> str | None:
     # User may speak full Urdu without saying the word "Urdu"
     if _has_urdu_script(raw):
         return "ur"
-    t = raw.lower()
+    t = raw.lower().strip()
     if any(s in t for s in _URDU_SIGNALS):
         return "ur"
     if any(s in t for s in _ENGLISH_SIGNALS):
+        return "en"
+    compact = re.sub(r"[^a-z]", "", t)
+    if compact and _ENGLISH_FUZZY_RE.match(compact):
         return "en"
     return None
 
@@ -111,9 +121,10 @@ def _speak(text: str, lang: str = "en") -> str | None:
     t = re.sub(r'\[TOPIC:[^\]]*\]\s*', '', t)
     t = re.sub(r'^(PAGE|TOPIC)\s*:\s*[^\n]*\n?', '', t, flags=re.MULTILINE)
 
-    # Safety: truncate if way too long
-    if len(t) > 800:
-        t = t[:800]
+    # Voice limit — allow longer faculty lists
+    cap = 2000 if re.search(r"\bfaculty\b", t, re.I) else 900
+    if len(t) > cap:
+        t = t[: cap - 3] + "..."
 
     return generate_tts(t, language=lang)
 
